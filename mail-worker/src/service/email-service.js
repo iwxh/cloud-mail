@@ -416,6 +416,7 @@ const emailService = {
 
 		const sendForm = {
 			from: `${params.name} <${params.accountEmail}>`,
+			headers: { Sender: params.accountEmail },
 			to: [...params.receiveEmail],
 			subject: params.subject,
 			text: params.text,
@@ -425,6 +426,7 @@ const emailService = {
 
 		if (params.sendType === 'reply') {
 			sendForm.headers = {
+				...sendForm.headers,
 				'in-reply-to': params.messageId,
 				'references': params.messageId
 			};

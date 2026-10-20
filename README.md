@@ -1,3 +1,5 @@
+> 本分支是通用 QQ Sender 修复模板。新项目请先阅读 [通用部署说明](DEPLOY-TEMPLATE.md)，使用 `npm run deploy` 和各项目独立的构建变量，不要沿用旧项目的 Worker、D1 或 KV 绑定。
+
 <p align="center">
     <img src="doc/demo/logo.png" width="80px" />
     <h1 align="center">Cloud Mail</h1>
