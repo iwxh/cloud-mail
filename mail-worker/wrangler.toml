@@ -1,4 +1,4 @@
-name = "cloud-mail3"
+name = "cloud-mail4"
 main = "src/index.js"
 compatibility_date = "2025-06-04"
 keep_vars = true
@@ -8,12 +8,12 @@ enabled = true
 
 [[d1_databases]]
 binding = "db"
-database_name = "dbkmail"
-database_id = "4fabe427-319c-4df0-ad10-06a8b1736d69"
+database_name = "dbpl"
+database_id = "7bf54f31-731b-4db4-bd69-be4aa4048cc7"
 
 [[kv_namespaces]]
 binding = "kv"
-id = "b6e6d04c166043ac8d3695aa6afad1fa"
+id = "d46b7ec49bd3427c91805398dc98f3b0"
 
 #[[r2_buckets]]
 #binding = "r2"			#r2对象存储绑定名默认不可修改
