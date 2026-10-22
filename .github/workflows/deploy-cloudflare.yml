@@ -1,6 +1,10 @@
-name: Validate reusable QQ template (no deployment)
+name: Validate and build QQ template (no deployment)
 
 on:
+  push:
+    branches: [main, qq-sender-template]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -17,3 +21,37 @@ jobs:
       - name: Test template configuration and Sender handling without network calls
         working-directory: mail-worker
         run: npm run test:template
+
+  bundle-dry-run:
+    needs: template-tests
+    runs-on: ubuntu-latest
+    env:
+      MAIL_WORKER_NAME: example-mail-ci
+      MAIL_D1_DATABASE_NAME: example-mail-ci-db
+      MAIL_D1_DATABASE_ID: 11111111-1111-4111-8111-111111111111
+      MAIL_KV_NAMESPACE_ID: '11111111111111111111111111111111'
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.10.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: |
+            mail-worker/pnpm-lock.yaml
+            mail-vue/pnpm-lock.yaml
+      - name: Install Worker dependencies
+        working-directory: mail-worker
+        run: pnpm install --frozen-lockfile
+      - name: Compile frontend and Worker without uploading
+        working-directory: mail-worker
+        run: npm run deploy -- --dry-run
+      - name: Verify actual build outputs and configuration cleanup
+        working-directory: mail-worker
+        run: |
+          test -s dist/index.html
+          test -s .wrangler/template-dry-run/index.js
+          test ! -e wrangler.generated.json

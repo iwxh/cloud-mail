@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const templateBranch = 'qq-sender-template';
+export const productionBranches = ['main', templateBranch];
 const defaultWorkerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function required(env, key, pattern) {
@@ -15,8 +16,8 @@ function required(env, key, pattern) {
 }
 
 export function createConfig(env) {
-  if (env.WORKERS_CI === '1' && env.WORKERS_CI_BRANCH !== templateBranch) {
-    throw new Error(`Only the production branch ${templateBranch} may use this template.`);
+  if (env.WORKERS_CI === '1' && !productionBranches.includes(env.WORKERS_CI_BRANCH)) {
+    throw new Error(`Only production branches ${productionBranches.join(' or ')} may use this template.`);
   }
 
   const name = required(env, 'MAIL_WORKER_NAME', /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/);

@@ -4,7 +4,7 @@
 	"private": true,
 	"scripts": {
 		"dev": "wrangler dev --config wrangler-dev.toml",
-		"test": "wrangler deploy --config wrangler-test.toml",
+		"test": "node --test scripts/deploy-template.test.mjs",
 		"deploy": "node scripts/deploy-template.mjs",
 		"check:template": "node scripts/deploy-template.mjs --check",
 		"test:template": "node --test scripts/deploy-template.test.mjs",

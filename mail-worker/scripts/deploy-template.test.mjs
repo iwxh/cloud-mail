@@ -49,10 +49,12 @@ test('runtime secrets and domain settings are not copied into generated configur
   assert.equal(JSON.stringify(config).includes('not-for-config'), false);
 });
 
-test('only the template production branch is accepted by Workers Builds', () => {
-  assert.doesNotThrow(() => createConfig({ ...example, WORKERS_CI: '1', WORKERS_CI_BRANCH: 'qq-sender-template' }));
-  for (const branch of ['main', 'other-preview', undefined]) {
-    assert.throws(() => createConfig({ ...example, WORKERS_CI: '1', WORKERS_CI_BRANCH: branch }), /production branch/);
+test('template and merged main are accepted; unrelated preview branches are blocked', () => {
+  for (const branch of ['main', 'qq-sender-template']) {
+    assert.doesNotThrow(() => createConfig({ ...example, WORKERS_CI: '1', WORKERS_CI_BRANCH: branch }));
+  }
+  for (const branch of ['other-preview', 'fix/qq-sender-kmail-20261020', undefined]) {
+    assert.throws(() => createConfig({ ...example, WORKERS_CI: '1', WORKERS_CI_BRANCH: branch }), /production branches/);
   }
 });
 
