@@ -1,0 +1,23 @@
+name: First-domain acceptance (approval required)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize, ready_for_review]
+    paths:
+      - '.github/workflows/first-domain-acceptance.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    if: >-
+      github.repository == 'iwxh/cloud-mail' &&
+      github.event.pull_request.number == 3 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'feat/oneclick-cf-mail' &&
+      github.event.pull_request.draft == false
+    uses: ./.github/workflows/new-mail-service.yml
+    with:
+      domain: iwxh.cc

@@ -9,6 +9,10 @@
 代码分支为 `feat/oneclick-cf-mail`。合并到默认分支前，新工作流可能不会出现在 Actions 的手动运行列表中。
 不要为显示按钮而直接合并：当前仓库的 main 仍被部分现有服务自动跟随，必须先安排隔离或暂停相关自动构建。
 
+首轮验收专用工作流 `first-domain-acceptance.yml` 仅允许同仓库 PR #3、`feat/oneclick-cf-mail` 分支、非草稿状态，以 `iwxh.cc` 为固定目标调用同一部署器。
+它仍受 `mail-provisioning` 的人工审批约束；需单独批准该 PR 的 `refs/pull/3/merge` 部署引用，不能放开所有 PR 或取消审批。
+验收完成后删除此专用工作流，再单独安排正式的一键入口，不会为测试而合并 main。
+
 ## 首次准备（只需一次）
 
 1. Cloudflare 账号已开通 Workers Paid，并有可用的 D1、KV、Worker、Cron 和发信额度。部署器不会代购套餐，也不会绕过平台审批。
@@ -74,6 +78,7 @@
 - 等待 1.1.1.1 和 8.8.8.8 公网解析均匹配 MX、SPF、DKIM、DMARC，再请求发送激活码；退信或被抑制的请求不会报告为成功。
 
 根域名、www 等现有 A/AAAA 记录不会修改。
+CF 自动扁平化的根域 CNAME 也会原样保留，可与根域 MX/TXT 共存；非根域的邮件认证名称存在 CNAME 冲突时仍会停止。
 发现 `mail.域名` 已有 DNS/Worker、其他邮件服务的 MX/SPF、已有生效的收信规则或不属于本部署器的资源时，停止并要求人工检查。
 既有 DMARC 策略保留，不自动放宽。
 

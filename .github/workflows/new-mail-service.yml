@@ -1,6 +1,11 @@
 name: New Cloud Mail service
 
 on:
+  workflow_call:
+    inputs:
+      domain:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       domain:

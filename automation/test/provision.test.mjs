@@ -261,6 +261,22 @@ test('DNS helper refuses unrelated names and conflicting records; existing DMARC
   assert.equal(cf.writes.length, 0);
 });
 
+test('Cloudflare apex CNAME is preserved while routing MX/TXT is added; subdomain CNAME still blocks', async () => {
+  const cf = new FakeCF();
+  cf.dns = [
+    { type: 'CNAME', name: domain, content: 'website.example.net', proxied: true },
+    { type: 'CNAME', name: `www.${domain}`, content: 'website.example.net', proxied: true }
+  ];
+  const before = structuredClone(cf.dns);
+  await provision(cf.options());
+  assert.deepEqual(cf.dns.slice(0, 2), before);
+  assert.equal(cf.dns.filter(record => record.type === 'MX' && record.name === domain).length, 3);
+  assert.equal(cf.dns.some(record => record.type === 'TXT' && record.name === domain && /^v=spf1\b/.test(record.content)), true);
+  cf.dns.push({ type: 'CNAME', name: `cf-bounce.${domain}`, content: 'another.example.net' });
+  await assert.rejects(ensureEmailDNS(cf, zoneId, domain,
+    [{ type: 'TXT', name: `cf-bounce.${domain}`, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' }], 'sending'), /CNAME conflict/);
+});
+
 test('foreign database is not initialized and interrupted owned initialization can resume', async () => {
   const cf = new FakeCF(); await provision(cf.options());
   const state = cf.state;

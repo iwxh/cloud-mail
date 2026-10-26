@@ -66,7 +66,8 @@ export async function ensureEmailDNS(cf, zoneId, domain, desired, kind) {
     if (!allowed.includes(record.name)) throw new Error(`Email DNS record outside the approved scope: ${record.name}`);
     if (record.type === 'MX' && record.name.includes('_domainkey')) throw new Error('Unexpected email DNS type.');
     const matches = existing.filter(item => item.name.toLowerCase().replace(/\.$/, '') === record.name);
-    if (matches.some(item => item.type === 'CNAME')) throw new Error(`CNAME conflict at ${record.name}.`);
+    // Cloudflare always flattens apex CNAMEs, so root MX/TXT can coexist without changing the website record.
+    if (record.name !== domain && matches.some(item => item.type === 'CNAME')) throw new Error(`CNAME conflict at ${record.name}.`);
     if (matches.some(item => sameRecord(item, record))) continue;
     if (record.name === `_dmarc.${domain}` && matches.some(item => item.type === 'TXT' && /^v=DMARC1;/i.test(item.content))) continue;
     if (matches.some(item => item.type === record.type) && !(record.type === 'MX' &&
