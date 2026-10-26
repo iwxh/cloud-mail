@@ -1,0 +1,274 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { Cloudflare } from '../cloudflare.mjs';
+import { freshSchema, sqliteAdapter } from '../schema.mjs';
+import { domainName, names, inspect, provision, initialize, ensureEmailDNS, STATE_KEY } from '../provision.mjs';
+import { setupRequest, deploymentMeta, sha256 } from '../../mail-worker/src/oneclick/setup.js';
+import cryptoUtils from '../../mail-worker/src/utils/crypto-utils.js';
+
+const domain = 'example.com';
+const accountId = 'a'.repeat(32);
+const zoneId = 'b'.repeat(32);
+const ownerEmail = 'owner@example.net';
+const commit = 'c'.repeat(40);
+const repository = 'test/cloud-mail';
+const workerDir = new URL('../../mail-worker/', import.meta.url).pathname;
+const schema = await freshSchema(new URL('../../mail-worker/', import.meta.url));
+
+class FakeCF {
+  constructor() {
+    this.namespaces = [];
+    this.databases = [];
+    this.dns = [{ type: 'A', name: domain, content: '192.0.2.1' }];
+    this.domains = [];
+    this.routes = [];
+    this.rules = [];
+    this.senders = [];
+    this.secrets = [];
+    this.settings = null;
+    this.routing = { enabled: false };
+    this.catchAll = { enabled: false, actions: [{ type: 'drop' }] };
+    this.state = null;
+    this.db = null;
+    this.writes = [];
+    this.emails = [];
+    this.ownerVerified = true;
+    this.deploys = 0;
+  }
+  async list(path, params = {}) {
+    if (path === '/zones') return [{ id: zoneId, name: domain, status: 'active', account: { id: accountId } }];
+    if (path.endsWith('/storage/kv/namespaces')) return structuredClone(this.namespaces);
+    if (path.endsWith('/workers/domains')) return structuredClone(this.domains);
+    if (path.endsWith('/workers/routes')) return structuredClone(this.routes);
+    if (path.endsWith('/dns_records')) return structuredClone(this.dns.filter(item => !params.name || item.name === params.name));
+    if (path.endsWith('/email/routing/rules')) return structuredClone(this.rules);
+    if (path.endsWith('/email/routing/addresses')) return [{ email: ownerEmail, verified: this.ownerVerified ? '2026-01-01' : null }];
+    if (path.endsWith('/email/sending/subdomains')) return structuredClone(this.senders);
+    if (path.endsWith('/d1/database')) return structuredClone(this.databases);
+    throw new Error(`Unhandled list: ${path}`);
+  }
+  async value() { return structuredClone(this.state); }
+  async putValue(a, id, key, state) {
+    assert.equal(a, accountId); assert.equal(id, this.namespaces[0].id); assert.equal(key, STATE_KEY);
+    this.writes.push('state'); this.state = structuredClone(state);
+  }
+  async get(path) {
+    if (path.endsWith('/settings')) return structuredClone(this.settings);
+    if (path.endsWith('/secrets')) return structuredClone(this.secrets);
+    if (path.endsWith('/email/routing/rules/catch_all')) return structuredClone(this.catchAll);
+    if (path.endsWith('/email/routing')) return structuredClone(this.routing);
+    if (path.endsWith('/email/routing/dns')) return [
+      ...[1, 2, 3].map(i => ({ type: 'MX', name: '@', content: `route${i}.mx.cloudflare.net`, priority: i * 10 })),
+      { type: 'TXT', name: '@', content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' },
+      { type: 'TXT', name: `cf2024-1._domainkey.${domain}`, content: 'v=DKIM1; p=routing' }
+    ];
+    if (path.includes('/email/sending/subdomains/') && path.endsWith('/dns')) return [
+      ...[1, 2, 3].map(i => ({ type: 'MX', name: `cf-bounce.${domain}`, content: `route${i}.mx.cloudflare.net`, priority: i * 10 })),
+      { type: 'TXT', name: `cf-bounce.${domain}`, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' },
+      { type: 'TXT', name: `cf-bounce._domainkey.${domain}`, content: 'v=DKIM1; p=sending' },
+      { type: 'TXT', name: `_dmarc.${domain}`, content: 'v=DMARC1; p=reject;' }
+    ];
+    throw new Error(`Unhandled get: ${path}`);
+  }
+  async request(method, path, body) {
+    this.writes.push(`${method} ${path}`);
+    if (method === 'POST' && path.endsWith('/storage/kv/namespaces')) {
+      const item = { id: 'd'.repeat(32), title: body.title }; this.namespaces.push(item); return { result: item };
+    }
+    if (method === 'POST' && path.endsWith('/d1/database')) {
+      const item = { uuid: '11111111-1111-4111-8111-111111111111', name: body.name };
+      this.databases.push(item); this.db = new DatabaseSync(':memory:'); return { result: item };
+    }
+    if (path.endsWith('/dns_records')) { this.dns.push(structuredClone(body)); return { result: { id: 'dns' } }; }
+    if (path.endsWith('/workers/domains')) { this.domains.push(structuredClone(body)); return { result: body }; }
+    if (path.endsWith('/secrets')) { this.secrets.push({ name: body.name }); return { result: {} }; }
+    if (path.endsWith('/email/sending/subdomains')) {
+      const item = { tag: 'e'.repeat(32), name: body.name, enabled: true }; this.senders.push(item); return { result: item };
+    }
+    if (path.endsWith('/email/routing/dns')) { this.routing.enabled = true; return { result: this.routing }; }
+    if (path.endsWith('/rules/catch_all')) { this.catchAll = structuredClone(body); return { result: body }; }
+    if (path.endsWith('/email/sending/send')) { this.emails.push(body); return { result: { queued: [ownerEmail] } }; }
+    throw new Error(`Unhandled write: ${method} ${path}`);
+  }
+  async query(a, id, sql, params = []) {
+    assert.equal(a, accountId); assert.equal(id, this.databases[0].uuid);
+    this.writes.push('sql');
+    if (/^\s*(SELECT|PRAGMA)/i.test(sql)) return [{ success: true, results: this.db.prepare(sql).all(...params) }];
+    if (!params.length) this.db.exec(sql);
+    else this.db.prepare(sql).run(...params);
+    return [{ success: true, results: [] }];
+  }
+  async deploy(config) {
+    this.deploys++;
+    this.settings = { bindings: [
+      { name: 'ONECLICK_DEPLOYMENT_ID', text: config.vars.ONECLICK_DEPLOYMENT_ID },
+      { name: 'db', id: config.d1_databases[0].database_id },
+      { name: 'kv', namespace_id: config.kv_namespaces[0].id }, { name: 'email', type: 'send_email' }
+    ] };
+  }
+  options(extra = {}) {
+    return { cf: this, accountId, domain, repository, commit, ownerEmail, apply: true, schema, workerDir,
+      deployWorker: config => this.deploy(config),
+      probe: async () => ({ deploymentId: this.state.deploymentId, schemaReady: true,
+        activated: !!this.db.prepare('SELECT activated FROM _cloudmail_deployment').get().activated }),
+      log: () => {}, ...extra };
+  }
+}
+
+test('domain validation rejects shell, URL, wildcard, IP, mixed case, whitespace and path input', () => {
+  assert.equal(domainName(domain), domain);
+  for (const value of ['Example.com', ' example.com', 'example.com ', '*.example.com', 'https://example.com', 'example.com/a', 'a.com;echo', '127.0.0.1', 'a..com', '-a.com', 'a.com\n', '${{secrets.X}}', 'xn--.com']) {
+    assert.throws(() => domainName(value), undefined, value);
+  }
+});
+
+test('read-only plan never creates resources or DNS records', async () => {
+  const cf = new FakeCF();
+  const result = await provision(cf.options({ apply: false }));
+  assert.equal(result.mode, 'plan'); assert.deepEqual(cf.writes, []); assert.equal(cf.deploys, 0);
+});
+
+test('existing website, mail provider, catch-all and unverified owner each fail before writes', async () => {
+  const cases = [
+    cf => cf.dns.push({ type: 'CNAME', name: `mail.${domain}`, content: 'old.example.net' }),
+    cf => cf.dns.push({ type: 'MX', name: domain, content: 'mx.legacy.example' }),
+    cf => cf.dns.push({ type: 'TXT', name: domain, content: 'v=spf1 include:legacy.example -all' }),
+    cf => cf.catchAll = { enabled: true, actions: [{ type: 'worker', value: ['old-worker'] }] },
+    cf => cf.settings = { bindings: [] },
+    cf => cf.namespaces.push({ id: 'd'.repeat(32), title: names(domain).kv }),
+    cf => cf.rules.push({ enabled: true, matchers: [{ type: 'literal' }] }),
+    cf => cf.routes.push({ pattern: '*.example.com/*', script: 'old-worker' }),
+    cf => cf.ownerVerified = false
+  ];
+  for (const modify of cases) {
+    const cf = new FakeCF(); modify(cf);
+    await assert.rejects(provision(cf.options())); assert.deepEqual(cf.writes, []);
+  }
+});
+
+test('new project gets isolated resources, reserved admin, closed signup, routing and activation email', async () => {
+  const cf = new FakeCF();
+  const result = await provision(cf.options({ forward: true }));
+  assert.equal(result.receiveTest, 'pending_external_test'); assert.equal(cf.deploys, 1);
+  assert.equal(cf.namespaces.length, 1); assert.equal(cf.databases.length, 1);
+  assert.equal(cf.db.prepare('SELECT email FROM user').get().email, 'admin@example.com');
+  assert.equal(cf.db.prepare('SELECT register FROM setting').get().register, 1);
+  assert.deepEqual({ ...cf.db.prepare('SELECT forward_email,rule_email,rule_type FROM setting').get() },
+    { forward_email: ownerEmail, rule_email: 'admin@example.com', rule_type: 1 });
+  assert.equal(cf.catchAll.actions[0].value[0], names(domain).worker);
+  assert.deepEqual(cf.dns[0], { type: 'A', name: domain, content: '192.0.2.1' });
+  assert.equal(cf.dns.filter(item => item.type === 'MX' && item.name === domain).length, 3);
+  assert.equal(cf.dns.filter(item => item.type === 'MX' && item.name === `cf-bounce.${domain}`).length, 3);
+  assert.match(cf.emails[0].text, /https:\/\/mail.example.com\/setup/);
+  const code = cf.emails[0].text.match(/\n([a-f0-9]{64})\n/)[1];
+  assert.equal(cf.db.prepare('SELECT activation_hash FROM _cloudmail_deployment').get().activation_hash, await sha256(code));
+  assert.equal(cf.db.prepare('SELECT password FROM user').get().password.includes(code), false);
+});
+
+test('repeat deployment does not duplicate resources, reset passwords or rotate JWT', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  const password = cf.db.prepare('SELECT password FROM user').get().password;
+  await provision(cf.options());
+  assert.equal(cf.deploys, 1); assert.equal(cf.namespaces.length, 1); assert.equal(cf.databases.length, 1);
+  assert.equal(cf.secrets.length, 1); assert.equal(cf.emails.length, 2);
+  assert.equal(cf.db.prepare('SELECT password FROM user').get().password, password);
+  cf.db.exec('UPDATE _cloudmail_deployment SET activated=1');
+  await provision(cf.options()); assert.equal(cf.emails.length, 2);
+});
+
+test('changing source commit or recorded D1 binding is rejected', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  await assert.rejects(provision(cf.options({ commit: 'f'.repeat(40) })), /original workflow/);
+  cf.settings.bindings.find(item => item.name === 'db').id = '22222222-2222-4222-8222-222222222222';
+  await assert.rejects(provision(cf.options()), /D1 binding/);
+});
+
+test('completed project is not redeployed or silently unpaused on a repeat run', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  cf.db.exec('UPDATE _cloudmail_deployment SET activated=1');
+  cf.catchAll.enabled = false;
+  cf.routing.enabled = false;
+  const start = cf.writes.length;
+  await provision(cf.options());
+  assert.equal(cf.catchAll.enabled, false); assert.equal(cf.routing.enabled, false);
+  assert.equal(cf.deploys, 1);
+  assert.equal(cf.writes.slice(start).some(item => /^(POST|PUT)/.test(item)), false);
+});
+
+test('interrupted sending-domain creation is reconciled only with persisted intent', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  delete cf.state.sendingId;
+  await inspect(cf, { accountId, domain, repository, ownerEmail });
+  cf.state.sendingRequested = false;
+  await assert.rejects(inspect(cf, { accountId, domain, repository, ownerEmail }), /already has/);
+});
+
+test('DNS helper refuses unrelated names and conflicting records; existing DMARC is preserved', async () => {
+  const cf = new FakeCF();
+  await assert.rejects(ensureEmailDNS(cf, zoneId, domain, [{ type: 'TXT', name: 'other.example.net', content: 'x' }], 'sending'));
+  cf.dns.push({ type: 'TXT', name: `cf-bounce.${domain}`, content: 'v=spf1 include:old.example -all' });
+  await assert.rejects(ensureEmailDNS(cf, zoneId, domain, [{ type: 'TXT', name: `cf-bounce.${domain}`, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' }], 'sending'));
+  cf.dns.push({ type: 'TXT', name: `_dmarc.${domain}`, content: 'v=DMARC1; p=reject; rua=mailto:security@example.com' });
+  await ensureEmailDNS(cf, zoneId, domain, [{ type: 'TXT', name: `_dmarc.${domain}`, content: 'v=DMARC1; p=none;' }], 'sending');
+  assert.equal(cf.writes.length, 0);
+});
+
+test('foreign database is not initialized and interrupted owned initialization can resume', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  const state = cf.state;
+  const oldPassword = cf.db.prepare('SELECT password FROM user').get().password;
+  cf.db.exec('UPDATE _cloudmail_deployment SET schema_ready=0');
+  await initialize(cf, state, schema, ownerEmail, false);
+  assert.equal(cf.db.prepare('SELECT COUNT(*) AS n FROM user').get().n, 1);
+  assert.equal(cf.db.prepare('SELECT COUNT(*) AS n FROM setting').get().n, 1);
+  assert.equal(cf.db.prepare('SELECT password FROM user').get().password, oldPassword);
+  cf.db.exec('DROP TABLE _cloudmail_deployment');
+  await assert.rejects(initialize(cf, state, schema, ownerEmail, false), /not empty/);
+});
+
+test('activation requires same origin, valid code and password; replay cannot reset admin', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  const env = { db: sqliteAdapter(cf.db), ONECLICK_DOMAIN: domain, ONECLICK_DEPLOYMENT_ID: cf.state.deploymentId };
+  const code = cf.emails[0].text.match(/\n([a-f0-9]{64})\n/)[1];
+  const meta = await deploymentMeta(env);
+  const send = (values = {}, origin = 'https://mail.example.com') => new Request('https://mail.example.com/setup', {
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ code, password: 'A strong password 123!', confirm: 'A strong password 123!', ...values })
+  });
+  const hasher = password => cryptoUtils.hashPassword(password);
+  assert.equal((await setupRequest(send({}, 'https://evil.example'), env, meta, hasher)).status, 403);
+  assert.equal((await setupRequest(send({ code: 'f'.repeat(64) }), env, meta, hasher)).status, 400);
+  assert.equal((await setupRequest(send({ confirm: 'mismatch' }), env, meta, hasher)).status, 400);
+  assert.equal((await setupRequest(send(), env, meta, hasher)).status, 303);
+  const user = cf.db.prepare('SELECT password,salt FROM user').get();
+  assert.equal(await cryptoUtils.verifyPassword('A strong password 123!', user.salt, user.password), true);
+  assert.equal((await setupRequest(send({ password: 'replacement password', confirm: 'replacement password' }), env, meta, hasher)).status, 409);
+  assert.equal(cf.db.prepare('SELECT password FROM user').get().password, user.password);
+  assert.equal((await setupRequest(send(), env, await deploymentMeta(env), hasher)).status, 404);
+});
+
+test('expired activation code is rejected and deployment identity must match', async () => {
+  const cf = new FakeCF(); await provision(cf.options());
+  const env = { db: sqliteAdapter(cf.db), ONECLICK_DOMAIN: domain, ONECLICK_DEPLOYMENT_ID: cf.state.deploymentId };
+  cf.db.exec('UPDATE _cloudmail_deployment SET activation_expires=0');
+  const code = cf.emails[0].text.match(/\n([a-f0-9]{64})\n/)[1];
+  const request = new Request('https://mail.example.com/setup', { method: 'POST',
+    headers: { Origin: 'https://mail.example.com', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ code, password: 'safe password 123', confirm: 'safe password 123' }) });
+  assert.equal((await setupRequest(request, env, await deploymentMeta(env), () => { throw new Error('must not hash'); })).status, 400);
+  assert.equal(await deploymentMeta({ ...env, ONECLICK_DEPLOYMENT_ID: 'e'.repeat(64) }), null);
+});
+
+test('API client does not follow redirects, leak secrets, or ignore later inventory pages', async () => {
+  const calls = [];
+  const cf = new Cloudflare('private-token', async (url, options) => {
+    calls.push({ url, redirect: options.redirect });
+    const page = Number(new URL(url).searchParams.get('page'));
+    return Response.json({ success: true, result: [{ page }], result_info: { total_pages: 2 } });
+  });
+  assert.deepEqual(await cf.list('/zones'), [{ page: 1 }, { page: 2 }]);
+  assert.equal(calls.every(call => call.redirect === 'error'), true);
+  const failed = new Cloudflare('private-token', async () => Response.json({ success: false, errors: [{ code: 99, message: 'private-token' }] }, { status: 403 }));
+  await assert.rejects(failed.get('/zones'), error => !error.message.includes('private-token') && error.message.includes('99'));
+});

@@ -1,0 +1,45 @@
+name: One-click deployment safety checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'automation/**'
+      - 'mail-worker/src/oneclick/**'
+      - 'mail-worker/src/oneclick-entry.js'
+      - '.github/workflows/new-mail-service.yml'
+      - '.github/workflows/oneclick-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --experimental-vm-modules --test automation/test/*.test.mjs
+  bundle-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.10.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: |
+          pnpm --dir mail-worker install --frozen-lockfile
+          pnpm --dir mail-vue install --frozen-lockfile
+          pnpm --dir mail-vue run build
+      - name: Bundle the actual one-click Worker without credentials or uploads
+        run: node --experimental-vm-modules automation/check-bundle.mjs
