@@ -19,8 +19,8 @@ id = "d46b7ec49bd3427c91805398dc98f3b0"
 #binding = "r2"			#r2对象存储绑定名默认不可修改
 #bucket_name = ""		#r2对象存储桶的名字
 
-#[[send_email]]
-#name = "email"			#CF发件, 配置后优先使用
+[[send_email]]
+name = "email"			#CF发件, 配置后优先使用
 
 [ai]
 binding = "ai"
