@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { Cloudflare } from '../cloudflare.mjs';
 import { freshSchema, sqliteAdapter } from '../schema.mjs';
+import { verifyPublicDNS } from '../public-dns.mjs';
 import { domainName, names, inspect, provision, initialize, ensureEmailDNS, STATE_KEY } from '../provision.mjs';
 import { setupRequest, deploymentMeta, sha256 } from '../../mail-worker/src/oneclick/setup.js';
 import cryptoUtils from '../../mail-worker/src/utils/crypto-utils.js';
@@ -88,7 +89,10 @@ class FakeCF {
     }
     if (path.endsWith('/email/routing/dns')) { this.routing.enabled = true; return { result: this.routing }; }
     if (path.endsWith('/rules/catch_all')) { this.catchAll = structuredClone(body); return { result: body }; }
-    if (path.endsWith('/email/sending/send')) { this.emails.push(body); return { result: { queued: [ownerEmail] } }; }
+    if (path.endsWith('/email/sending/send')) {
+      assert.deepEqual(body.to, [ownerEmail]);
+      this.emails.push(body); return { result: this.sendResult || { queued: [ownerEmail] } };
+    }
     throw new Error(`Unhandled write: ${method} ${path}`);
   }
   async query(a, id, sql, params = []) {
@@ -112,6 +116,7 @@ class FakeCF {
       deployWorker: config => this.deploy(config),
       probe: async () => ({ deploymentId: this.state.deploymentId, schemaReady: true,
         activated: !!this.db.prepare('SELECT activated FROM _cloudmail_deployment').get().activated }),
+      verifyDNS: async records => { assert.equal(records.some(record => record.name === `_dmarc.${domain}`), true); },
       log: () => {}, ...extra };
   }
 }
@@ -151,6 +156,7 @@ test('new project gets isolated resources, reserved admin, closed signup, routin
   const cf = new FakeCF();
   const result = await provision(cf.options({ forward: true }));
   assert.equal(result.receiveTest, 'pending_external_test'); assert.equal(cf.deploys, 1);
+  assert.equal(result.publicDNS, 'verified_on_two_public_resolvers');
   assert.equal(cf.namespaces.length, 1); assert.equal(cf.databases.length, 1);
   assert.equal(cf.db.prepare('SELECT email FROM user').get().email, 'admin@example.com');
   assert.equal(cf.db.prepare('SELECT register FROM setting').get().register, 1);
@@ -164,6 +170,47 @@ test('new project gets isolated resources, reserved admin, closed signup, routin
   const code = cf.emails[0].text.match(/\n([a-f0-9]{64})\n/)[1];
   assert.equal(cf.db.prepare('SELECT activation_hash FROM _cloudmail_deployment').get().activation_hash, await sha256(code));
   assert.equal(cf.db.prepare('SELECT password FROM user').get().password.includes(code), false);
+});
+
+test('activation requires the owner to be queued or delivered; rejected recipients can resume', async () => {
+  for (const sendResult of [{ permanent_bounces: [ownerEmail] }, { suppressed_recipients: [ownerEmail] }, { queued: [] }]) {
+    const cf = new FakeCF(); cf.sendResult = sendResult;
+    await assert.rejects(provision(cf.options()), /not queued or delivered/);
+    assert.equal(cf.state.configured, undefined);
+    cf.sendResult = { delivered: [ownerEmail] };
+    await provision(cf.options());
+    assert.equal(cf.state.configured, true); assert.equal(cf.deploys, 1);
+  }
+});
+
+test('DNS propagation must pass before activation is requested', async () => {
+  const cf = new FakeCF();
+  await assert.rejects(provision(cf.options({ verifyDNS: async () => { throw new Error('DNS pending'); } })), /DNS pending/);
+  assert.equal(cf.emails.length, 0); assert.equal(cf.state.configured, undefined);
+  await provision(cf.options());
+  assert.equal(cf.emails.length, 1); assert.equal(cf.deploys, 1);
+});
+
+test('public DNS verifier checks split TXT, MX priority, both resolvers and rejects duplicate SPF', async () => {
+  const records = [
+    { type: 'MX', name: domain, content: 'route1.mx.cloudflare.net', priority: 10 },
+    { type: 'TXT', name: domain, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' },
+    { type: 'TXT', name: `cf-bounce._domainkey.${domain}`, content: 'v=DKIM1; p=abcdef' },
+    { type: 'TXT', name: `_dmarc.${domain}`, content: 'v=DMARC1; p=reject;' }
+  ];
+  const resolver = () => ({
+    resolveMx: async () => [{ exchange: 'ROUTE1.MX.CLOUDFLARE.NET.', priority: 10 }],
+    resolveTxt: async name => records.filter(record => record.type === 'TXT' && record.name === name)
+      .map(record => [record.content.slice(0, 10), record.content.slice(10)])
+  });
+  const first = resolver(); const second = resolver();
+  await verifyPublicDNS(records, { resolvers: [first, second], attempts: 1 });
+  second.resolveMx = async () => [{ exchange: 'route1.mx.cloudflare.net', priority: 20 }];
+  await assert.rejects(verifyPublicDNS(records, { resolvers: [first, second], attempts: 1 }), /Public MX/);
+  second.resolveMx = first.resolveMx;
+  const txt = second.resolveTxt;
+  second.resolveTxt = async name => [...await txt(name), ...(name === domain ? [['v=spf1 -all']] : [])];
+  await assert.rejects(verifyPublicDNS(records, { resolvers: [first, second], attempts: 1 }), /Public MX/);
 });
 
 test('repeat deployment does not duplicate resources, reset passwords or rotate JWT', async () => {

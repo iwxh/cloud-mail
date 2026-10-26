@@ -5,6 +5,7 @@ import { writeFile, rm, appendFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { Cloudflare } from './cloudflare.mjs';
 import { freshSchema } from './schema.mjs';
+import { verifyPublicDNS } from './public-dns.mjs';
 
 export const STATE_KEY = '_cloudmail_provisioner_v1';
 export const APP_VERSION = 1;
@@ -192,20 +193,25 @@ async function requestActivation(cf, state, ownerEmail) {
   console.log(`::add-mask::${code}`);
   await cf.query(state.accountId, state.databaseId,
     'UPDATE _cloudmail_deployment SET activation_hash=?,activation_expires=? WHERE id=1 AND activated=0', [hash(code), Date.now() + 86400000]);
-  await cf.request('POST', `/accounts/${state.accountId}/email/sending/send`, {
-    from: `admin@${state.domain}`, to: ownerEmail, subject: `Cloud Mail activation: ${state.domain}`,
+  const { result } = await cf.request('POST', `/accounts/${state.accountId}/email/sending/send`, {
+    from: `admin@${state.domain}`, to: [ownerEmail], subject: `Cloud Mail activation: ${state.domain}`,
     text: `Website: https://mail.${state.domain}/setup\nAdmin: admin@${state.domain}\nActivation code (expires in 24 hours):\n${code}\n\nSet your own password on the setup page. Do not share this code. Re-running this workflow invalidates older pending codes.`
   });
+  const includesOwner = values => Array.isArray(values) && values.some(value => value.toLowerCase() === ownerEmail.toLowerCase());
+  if (includesOwner(result?.permanent_bounces) || includesOwner(result?.suppressed_recipients) ||
+      !(includesOwner(result?.queued) || includesOwner(result?.delivered))) {
+    throw new Error('Activation email was not queued or delivered to the owner. Check Cloudflare sending logs and rerun this same workflow.');
+  }
 }
 
-function report(state, status) {
+function report(state, status, publicDNS = 'not_rechecked_existing_project') {
   return { domain: state.domain, hostname: `mail.${state.domain}`, worker: state.worker, databaseId: state.databaseId,
-    activated: !!status.activated, forward: !!state.forward, receiveTest: 'pending_external_test',
+    activated: !!status.activated, forward: !!state.forward, publicDNS, receiveTest: 'pending_external_test',
     sendTest: status.activated ? 'not_requested_already_active' : 'activation_email_requested' };
 }
 
 export async function provision({ cf, accountId, domain, repository, commit, ownerEmail, forward = false, apply = false,
-  workerDir, schema, deployWorker, probe = probeWebsite, log = console.log }) {
+  workerDir, schema, deployWorker, probe = probeWebsite, verifyDNS = verifyPublicDNS, log = console.log }) {
   domain = domainName(domain);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail || '')) throw new Error('Set MAIL_OWNER_EMAIL in GitHub Secrets.');
   if (!/^[a-f0-9]{40}$/.test(commit || '') || !/^[\w.-]+\/[\w.-]+$/.test(repository || '')) throw new Error('A fixed source commit and repository are required.');
@@ -268,10 +274,12 @@ export async function provision({ cf, accountId, domain, repository, commit, own
     state.sendingId = sender.tag;
     await save();
   }
-  await ensureEmailDNS(cf, state.zoneId, domain, await cf.get(`${zonePath}/email/sending/subdomains/${state.sendingId}/dns`), 'sending');
+  const sendingRecords = await cf.get(`${zonePath}/email/sending/subdomains/${state.sendingId}/dns`);
+  await ensureEmailDNS(cf, state.zoneId, domain, sendingRecords, 'sending');
   const routing = await cf.get(`${zonePath}/email/routing`, true);
   if (!routing?.enabled) await cf.request('POST', `${zonePath}/email/routing/dns`, { name: domain });
-  await ensureEmailDNS(cf, state.zoneId, domain, await cf.get(`${zonePath}/email/routing/dns`), 'routing');
+  const routingRecords = await cf.get(`${zonePath}/email/routing/dns`);
+  await ensureEmailDNS(cf, state.zoneId, domain, routingRecords, 'routing');
   const catchAll = await cf.get(`${zonePath}/email/routing/rules/catch_all`, true);
   if (catchAll?.enabled && !(catchAll.actions?.length === 1 && catchAll.actions[0].type === 'worker' && catchAll.actions[0].value?.[0] === state.worker)) {
     throw new Error('Catch-all changed ownership during deployment; nothing overwritten.');
@@ -279,6 +287,13 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   if (!catchAll?.enabled) await cf.request('PUT', `${zonePath}/email/routing/rules/catch_all`, {
     enabled: true, name: `Cloud Mail ${domain}`, matchers: [{ type: 'all' }], actions: [{ type: 'worker', value: [state.worker] }]
   });
+  const publicRecords = [...routingRecords, ...sendingRecords].map(record => normalizeRecord(record, domain));
+  const dmarc = (await cf.list(`${zonePath}/dns_records`, { name: `_dmarc.${domain}`, type: 'TXT' }))
+    .filter(record => record.name === `_dmarc.${domain}` && record.type === 'TXT' && /^v=DMARC1;/i.test(record.content));
+  if (dmarc.length !== 1) throw new Error('Exactly one DMARC policy is required; existing records were not changed.');
+  const expectedDNS = publicRecords.filter(record => record.name !== `_dmarc.${domain}`);
+  expectedDNS.push(normalizeRecord(dmarc[0], domain));
+  await verifyDNS(expectedDNS);
   const status = await probe(`https://${checked.named.hostname}/_cloudmail/health`, state.deploymentId);
   if (!status.activated) {
     await requestActivation(cf, state, ownerEmail);
@@ -286,7 +301,7 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   }
   state.configured = true;
   await save();
-  return report(state, status);
+  return report(state, status, 'verified_on_two_public_resolvers');
 }
 
 export async function probeWebsite(url, deploymentId, fetcher = fetch) {
