@@ -9,9 +9,10 @@
 代码分支为 `feat/oneclick-cf-mail`。合并到默认分支前，新工作流可能不会出现在 Actions 的手动运行列表中。
 不要为显示按钮而直接合并：当前仓库的 main 仍被部分现有服务自动跟随，必须先安排隔离或暂停相关自动构建。
 
-首轮验收专用工作流 `first-domain-acceptance.yml` 仅允许同仓库 PR #3、`feat/oneclick-cf-mail` 分支、非草稿状态，以 `iwxh.cc` 为固定目标调用同一部署器。
-它仍受 `mail-provisioning` 的人工审批约束；需单独批准该 PR 的 `refs/pull/3/merge` 部署引用，不能放开所有 PR 或取消审批。
-验收完成后删除此专用工作流，再单独安排正式的一键入口，不会为测试而合并 main。
+首轮 `iwxh.cc` 的部署运行 [40443582270](https://github.com/iwxh/cloud-mail/actions/runs/40443582270) 已通过，公网 DNS 校验通过，外部测试邮件已进入新库。管理员激活和网站发信仍需完成实际验收。
+本次首轮暴露的根域 Email Routing 请求参数问题已修正，并增加回归测试；测试域名通过后台启用根域收信后，使用同一固定版本重试完成部署。
+临时的 `first-domain-acceptance.yml` 已移除，后续代码修改不会再次对固定测试域名发起部署。此前只允许同仓库 PR #3 的精确部署引用，并保留人工审批；没有开放其他 PR 或合并 main。
+正式的一键入口仍需在现有服务完成构建隔离后单独发布，不会为显示按钮而影响旧项目。
 复用工作流时，调用方必须逐项传递 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`MAIL_OWNER_EMAIL`，被调用方在 `workflow_call.secrets` 中声明为必填，并在任务上使用 `mail-provisioning` 环境；仅指定环境名称不足以传递密钥。
 不要使用 `secrets: inherit`，避免将无关的仓库密钥一起交给部署流程。密钥值仍只保存在受审批保护的环境中。
 
@@ -76,6 +77,7 @@
 - 新网站地址 `mail.域名` 和管理员地址 `admin@域名`。
 - 原生 CF 发信的 `email` 绑定和 CF 返回的认证记录。
 - 区域根域名的收信 MX/SPF、收信 DKIM、Catch-all → 本项目 Worker。
+- 启用区域根域收信时，调用 CF 的 `POST /zones/{zone_id}/email/routing/dns` 不传请求体；`name` 仅用于子域名，不能填写区域根域名。参见[官方接口示例](https://developers.cloudflare.com/api/resources/email_routing/subresources/dns/methods/create/)。
 - 隐藏 GitHub 图标，关闭默认公告弹窗，保留每日维护 Cron。
 - 管理员激活邮件和可选的管理员来信转发。
 - 等待 1.1.1.1 和 8.8.8.8 公网解析均匹配 MX、SPF、DKIM、DMARC，再请求发送激活码；退信或被抑制的请求不会报告为成功。

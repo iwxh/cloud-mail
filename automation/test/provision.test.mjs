@@ -37,6 +37,7 @@ class FakeCF {
     this.emails = [];
     this.ownerVerified = true;
     this.deploys = 0;
+    this.routingEnableBodies = [];
   }
   async list(path, params = {}) {
     if (path === '/zones') return [{ id: zoneId, name: domain, status: 'active', account: { id: accountId } }];
@@ -90,7 +91,11 @@ class FakeCF {
     if (path.endsWith('/email/sending/subdomains')) {
       const item = { tag: 'e'.repeat(32), name: body.name, enabled: true }; this.senders.push(item); return { result: item };
     }
-    if (path.endsWith('/email/routing/dns')) { this.routing.enabled = true; return { result: this.routing }; }
+    if (path.endsWith('/email/routing/dns')) {
+      assert.equal(body, undefined, 'Zone-apex routing must be enabled without a subdomain body');
+      this.routingEnableBodies.push(body);
+      this.routing.enabled = true; return { result: this.routing };
+    }
     if (path.endsWith('/rules/catch_all')) { this.catchAll = structuredClone(body); return { result: body }; }
     if (path.endsWith('/email/sending/send')) {
       assert.deepEqual(body.to, [ownerEmail]);
@@ -135,6 +140,13 @@ test('read-only plan never creates resources or DNS records', async () => {
   const cf = new FakeCF();
   const result = await provision(cf.options({ apply: false }));
   assert.equal(result.mode, 'plan'); assert.deepEqual(cf.writes, []); assert.equal(cf.deploys, 0);
+});
+
+test('zone-apex receiving is enabled without the subdomain name parameter', async () => {
+  const cf = new FakeCF();
+  await provision(cf.options());
+  assert.deepEqual(cf.routingEnableBodies, [undefined]);
+  assert.equal(cf.routing.enabled, true);
 });
 
 test('existing website, mail provider, catch-all and unverified owner each fail before writes', async () => {

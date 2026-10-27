@@ -298,7 +298,8 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   const sendingRecords = await cf.get(`${zonePath}/email/sending/subdomains/${state.sendingId}/dns`);
   await ensureEmailDNS(cf, state.zoneId, domain, sendingRecords, 'sending');
   const routing = await cf.get(`${zonePath}/email/routing`, true);
-  if (!routing?.enabled) await cf.request('POST', `${zonePath}/email/routing/dns`, { name: domain });
+  // Omitting name enables the zone apex; Cloudflare treats a supplied name as a subdomain.
+  if (!routing?.enabled) await cf.request('POST', `${zonePath}/email/routing/dns`);
   const routingRecords = await cf.get(`${zonePath}/email/routing/dns`);
   await ensureEmailDNS(cf, state.zoneId, domain, routingRecords, 'routing');
   // The Worker initializes its settings cache during health checks, before accepting inbound mail.
