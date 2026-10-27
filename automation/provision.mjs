@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { Cloudflare } from './cloudflare.mjs';
 import { freshSchema } from './schema.mjs';
 import { verifyPublicDNS } from './public-dns.mjs';
+import { txtValue, txtPresentation } from './dns-content.mjs';
 
 export const STATE_KEY = '_cloudmail_provisioner_v1';
 export const APP_VERSION = 1;
@@ -49,12 +50,15 @@ function normalizeRecord(record, domain) {
   if (!name || !['MX', 'TXT'].includes(record.type) || typeof record.content !== 'string') {
     throw new Error('Unexpected email DNS record returned by Cloudflare.');
   }
-  return { type: record.type, name, content: record.content, ttl: record.ttl || 1,
+  if (record.type === 'MX' && (!Number.isInteger(record.priority) || record.priority < 0 || record.priority > 65535)) {
+    throw new Error('Unexpected MX priority returned by Cloudflare.');
+  }
+  return { type: record.type, name, content: record.type === 'TXT' ? txtValue(record.content) : record.content, ttl: record.ttl || 1,
     ...(record.type === 'MX' ? { priority: record.priority } : {}) };
 }
 
 export function sameRecord(a, b) {
-  const content = record => record.type === 'MX' ? record.content.toLowerCase().replace(/\.$/, '') : record.content;
+  const content = record => record.type === 'MX' ? record.content.toLowerCase().replace(/\.$/, '') : txtValue(record.content);
   return a.type === b.type && a.name.toLowerCase().replace(/\.$/, '') === b.name && content(a) === content(b);
 }
 
@@ -72,12 +76,13 @@ export async function ensureEmailDNS(cf, zoneId, domain, desired, kind) {
     // Cloudflare always flattens apex CNAMEs, so root MX/TXT can coexist without changing the website record.
     if (record.name !== domain && matches.some(item => item.type === 'CNAME')) throw new Error(`CNAME conflict at ${record.name}.`);
     if (matches.some(item => sameRecord(item, record))) continue;
-    if (record.name === `_dmarc.${domain}` && matches.some(item => item.type === 'TXT' && /^v=DMARC1;/i.test(item.content))) continue;
+    if (record.name === `_dmarc.${domain}` && matches.some(item => item.type === 'TXT' && /^v=DMARC1;/i.test(txtValue(item.content)))) continue;
     if (matches.some(item => item.type === record.type) && !(record.type === 'MX' &&
-        matches.filter(item => item.type === 'MX').every(item => /^route[123]\.mx\.cloudflare\.net\.?$/i.test(item.content)))) {
+        matches.filter(item => item.type === 'MX').every(item => desired.some(value => sameRecord(item, normalizeRecord(value, domain)))))) {
       throw new Error(`Existing DNS conflict at ${record.name}; nothing overwritten.`);
     }
-    await cf.request('POST', `/zones/${zoneId}/dns_records`, record);
+    await cf.request('POST', `/zones/${zoneId}/dns_records`, record.type === 'TXT'
+      ? { ...record, content: txtPresentation(record.content) } : record);
     existing.push(record);
   }
 }
@@ -124,8 +129,8 @@ export async function inspect(cf, { accountId, domain, repository, ownerEmail })
   for (const record of records.filter(item => item.name === domain && item.type === 'MX')) {
     if (!/^route[123]\.mx\.cloudflare\.net\.?$/i.test(record.content)) throw new Error('Existing non-Cloudflare MX records; refusing to change the mail provider.');
   }
-  for (const record of records.filter(item => item.name === domain && item.type === 'TXT' && /^v=spf1\b/i.test(item.content))) {
-    if (record.content !== 'v=spf1 include:_spf.mx.cloudflare.net ~all') throw new Error('Existing SPF requires manual review; nothing overwritten.');
+  for (const record of records.filter(item => item.name === domain && item.type === 'TXT' && /^v=spf1\b/i.test(txtValue(item.content)))) {
+    if (txtValue(record.content) !== 'v=spf1 include:_spf.mx.cloudflare.net ~all') throw new Error('Existing SPF requires manual review; nothing overwritten.');
   }
   const catchAll = await cf.get(`${zonePath}/email/routing/rules/catch_all`, true);
   if (catchAll?.enabled && (!state || catchAll.actions?.length !== 1 || catchAll.actions[0].type !== 'worker' ||
@@ -307,7 +312,7 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   });
   const publicRecords = [...routingRecords, ...sendingRecords].map(record => normalizeRecord(record, domain));
   const dmarc = (await cf.list(`${zonePath}/dns_records`, { name: `_dmarc.${domain}`, type: 'TXT' }))
-    .filter(record => record.name === `_dmarc.${domain}` && record.type === 'TXT' && /^v=DMARC1;/i.test(record.content));
+    .filter(record => record.name === `_dmarc.${domain}` && record.type === 'TXT' && /^v=DMARC1;/i.test(txtValue(record.content)));
   if (dmarc.length !== 1) throw new Error('Exactly one DMARC policy is required; existing records were not changed.');
   const expectedDNS = publicRecords.filter(record => record.name !== `_dmarc.${domain}`);
   expectedDNS.push(normalizeRecord(dmarc[0], domain));

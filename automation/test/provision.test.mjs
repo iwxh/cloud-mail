@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Cloudflare } from '../cloudflare.mjs';
 import { freshSchema, sqliteAdapter } from '../schema.mjs';
 import { verifyPublicDNS } from '../public-dns.mjs';
+import { txtValue, txtPresentation } from '../dns-content.mjs';
 import { domainName, names, inspect, provision, initialize, ensureEmailDNS, STATE_KEY } from '../provision.mjs';
 import { setupRequest, deploymentMeta, sha256, ensureSettings } from '../../mail-worker/src/oneclick/setup.js';
 import cryptoUtils from '../../mail-worker/src/utils/crypto-utils.js';
@@ -237,7 +238,7 @@ test('public DNS verifier checks split TXT, MX priority, both resolvers and reje
   const resolver = () => ({
     resolveMx: async () => [{ exchange: 'ROUTE1.MX.CLOUDFLARE.NET.', priority: 10 }],
     resolveTxt: async name => records.filter(record => record.type === 'TXT' && record.name === name)
-      .map(record => [record.content.slice(0, 10), record.content.slice(10)])
+      .map(record => [txtValue(record.content).slice(0, 10), txtValue(record.content).slice(10)])
   });
   const first = resolver(); const second = resolver();
   await verifyPublicDNS(records, { resolvers: [first, second], attempts: 1 });
@@ -345,10 +346,59 @@ test('Cloudflare apex CNAME is preserved while routing MX/TXT is added; subdomai
   await provision(cf.options());
   assert.deepEqual(cf.dns.slice(0, 2), before);
   assert.equal(cf.dns.filter(record => record.type === 'MX' && record.name === domain).length, 3);
-  assert.equal(cf.dns.some(record => record.type === 'TXT' && record.name === domain && /^v=spf1\b/.test(record.content)), true);
+  assert.equal(cf.dns.some(record => record.type === 'TXT' && record.name === domain && /^v=spf1\b/.test(txtValue(record.content))), true);
   cf.dns.push({ type: 'CNAME', name: `cf-bounce.${domain}`, content: 'another.example.net' });
   await assert.rejects(ensureEmailDNS(cf, zoneId, domain,
     [{ type: 'TXT', name: `cf-bounce.${domain}`, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' }], 'sending'), /CNAME conflict/);
+});
+
+test('TXT presentation handles split strings and RFC escapes without weakening malformed-input checks', () => {
+  assert.equal(txtValue('"v=spf1 " "include:_spf.mx.cloudflare.net ~all"'), 'v=spf1 include:_spf.mx.cloudflare.net ~all');
+  assert.equal(txtValue('"a\\032b\\034c\\092d"'), 'a b"c\\d');
+  const long = 'v=DKIM1; p=' + 'A'.repeat(600);
+  assert.equal(txtValue(txtPresentation(long)), long);
+  assert.equal(txtValue(txtPresentation('a "quoted" \\ value')), 'a "quoted" \\ value');
+  assert.equal((txtPresentation(long).match(/"[^\"]*"/g) || []).length, 3);
+  for (const invalid of ['"unterminated', '"first"junk', 'broken"quote', '"\\999"', '"trailing\\']) {
+    assert.throws(() => txtValue(invalid));
+  }
+});
+
+test('quoted API SPF and DMARC values are compared semantically and never replaced', async () => {
+  const cf = new FakeCF();
+  cf.dns.push({ type: 'TXT', name: domain, content: '"v=spf1 include:_spf.mx.cloudflare.net ~all"' });
+  const policy = '"v=DMARC1; p=reject; " "rua=mailto:security@example.com"';
+  cf.dns.push({ type: 'TXT', name: `_dmarc.${domain}`, content: policy });
+  await inspect(cf, { accountId, domain, repository, ownerEmail });
+  await ensureEmailDNS(cf, zoneId, domain,
+    [{ type: 'TXT', name: domain, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' }], 'routing');
+  await ensureEmailDNS(cf, zoneId, domain,
+    [{ type: 'TXT', name: `_dmarc.${domain}`, content: 'v=DMARC1; p=none;' }], 'sending');
+  assert.equal(cf.writes.length, 0); assert.equal(cf.dns.at(-1).content, policy);
+  cf.dns[1].content = '"v=spf1 include:other.example -all"';
+  await assert.rejects(inspect(cf, { accountId, domain, repository, ownerEmail }), /SPF requires manual review/);
+});
+
+test('public DNS checks decode quoted expected values while DNS writes use valid character strings', async () => {
+  const cf = new FakeCF();
+  const record = {type: 'TXT', name: `cf-bounce._domainkey.${domain}`, content: '"v=DKIM1; " "p=abcdef"'};
+  await ensureEmailDNS(cf, zoneId, domain, [record], 'sending');
+  assert.equal(cf.dns.at(-1).content, '"v=DKIM1; p=abcdef"');
+  const resolver = {resolveTxt: async () => [['v=DKIM1; ', 'p=abcdef']]};
+  await verifyPublicDNS([record], {resolvers: [resolver, resolver], attempts: 1});
+});
+
+test('all MX hosts explicitly returned by CF can coexist but unrelated existing MX is protected', async () => {
+  const cf = new FakeCF();
+  const records = [
+    {type: 'MX', name: `cf-bounce.${domain}`, content: 'bounce-a.cloudflare-smtp.org', priority: 10},
+    {type: 'MX', name: `cf-bounce.${domain}`, content: 'bounce-b.cloudflare-smtp.org', priority: 20}
+  ];
+  await ensureEmailDNS(cf, zoneId, domain, records, 'sending');
+  assert.equal(cf.dns.filter(record => record.type === 'MX').length, 2);
+  cf.dns.push({type: 'MX', name: `cf-bounce.${domain}`, content: 'old-provider.example', priority: 30});
+  await assert.rejects(ensureEmailDNS(cf, zoneId, domain,
+    [...records, {type: 'MX', name: `cf-bounce.${domain}`, content: 'bounce-c.cloudflare-smtp.org', priority: 40}], 'sending'), /Existing DNS conflict/);
 });
 
 test('foreign database is not initialized and interrupted owned initialization can resume', async () => {

@@ -1,4 +1,5 @@
 import { Resolver } from 'node:dns/promises';
+import { txtValue } from './dns-content.mjs';
 
 const canonical = name => name.toLowerCase().replace(/\.$/, '');
 
@@ -17,7 +18,7 @@ export async function verifyPublicDNS(records, {
     if (!['MX', 'TXT'].includes(record.type)) throw new Error('Unsupported verification record type.');
     const key = `${record.type} ${canonical(record.name)}`;
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(record);
+    groups.get(key).push(record.type === 'TXT' ? { ...record, content: txtValue(record.content) } : record);
   }
   for (let attempt = 0; attempt < attempts; attempt++) {
     let ready = true;
