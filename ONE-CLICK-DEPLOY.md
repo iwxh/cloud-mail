@@ -9,8 +9,10 @@
 代码分支为 `feat/oneclick-cf-mail`。合并到默认分支前，新工作流可能不会出现在 Actions 的手动运行列表中。
 不要为显示按钮而直接合并：当前仓库的 main 仍被部分现有服务自动跟随，必须先安排隔离或暂停相关自动构建。
 
-首轮 `iwxh.cc` 的部署运行 [40443582270](https://github.com/iwxh/cloud-mail/actions/runs/40443582270) 已通过，公网 DNS 校验通过，外部测试邮件已进入新库。管理员激活和网站发信仍需完成实际验收。
+首轮 `iwxh.cc` 的部署运行 [40443582270](https://github.com/iwxh/cloud-mail/actions/runs/40443582270) 已通过，公网 DNS 校验通过。管理员已自行激活并登录，外部 Gmail 测试邮件已进入网页收件箱，从正式网站发往 QQ 的测试邮件也由用户确认收到。
 本次首轮暴露的根域 Email Routing 请求参数问题已修正，并增加回归测试；测试域名通过后台启用根域收信后，使用同一固定版本重试完成部署。
+激活页曾因 `Referrer-Policy: no-referrer` 使浏览器表单的 `Origin` 变成 `null`，已改为 `same-origin`；仍拒绝跨站、空值和缺失来源。线上测试项目仅修正这一项响应头，未重跑初始化。新部署代码已包含修正。
+首轮测试的 CF 原生发信在 QQ 上仍显示“代发”，不把消除该提示作为此通道的验收承诺。
 临时的 `first-domain-acceptance.yml` 已移除，后续代码修改不会再次对固定测试域名发起部署。此前只允许同仓库 PR #3 的精确部署引用，并保留人工审批；没有开放其他 PR 或合并 main。
 正式的一键入口仍需在现有服务完成构建隔离后单独发布，不会为显示按钮而影响旧项目。
 复用工作流时，调用方必须逐项传递 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`MAIL_OWNER_EMAIL`，被调用方在 `workflow_call.secrets` 中声明为必填，并在任务上使用 `mail-provisioning` 环境；仅指定环境名称不足以传递密钥。
