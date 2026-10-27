@@ -5,7 +5,7 @@ import { Cloudflare } from '../cloudflare.mjs';
 import { freshSchema, sqliteAdapter } from '../schema.mjs';
 import { verifyPublicDNS } from '../public-dns.mjs';
 import { domainName, names, inspect, provision, initialize, ensureEmailDNS, STATE_KEY } from '../provision.mjs';
-import { setupRequest, deploymentMeta, sha256 } from '../../mail-worker/src/oneclick/setup.js';
+import { setupRequest, deploymentMeta, sha256, ensureSettings } from '../../mail-worker/src/oneclick/setup.js';
 import cryptoUtils from '../../mail-worker/src/utils/crypto-utils.js';
 
 const domain = 'example.com';
@@ -191,6 +191,40 @@ test('DNS propagation must pass before activation is requested', async () => {
   assert.equal(cf.emails.length, 0); assert.equal(cf.state.configured, undefined);
   await provision(cf.options());
   assert.equal(cf.emails.length, 1); assert.equal(cf.deploys, 1);
+});
+
+test('unhealthy Worker never enables Catch-all or requests activation', async () => {
+  const cf = new FakeCF();
+  await assert.rejects(provision(cf.options({ probe: async () => { throw new Error('Settings cache not ready'); } })), /Settings cache not ready/);
+  assert.equal(cf.catchAll.enabled, false); assert.equal(cf.emails.length, 0);
+  await provision(cf.options());
+  assert.equal(cf.catchAll.enabled, true); assert.equal(cf.deploys, 1);
+});
+
+test('runtime settings bootstrap uses the original refresh callback and preserves existing settings', async () => {
+  const cache = new Map(); let refreshes = 0;
+  const env = { kv: { get: async key => cache.get(key) || null } };
+  const setting = { title: domain, resendTokens: {}, emailPrefixFilter: '', forwardStatus: 1 };
+  const refresh = async context => {
+    assert.equal(context.env, env); context.set('setting', setting);
+    cache.set('setting:', setting); refreshes++;
+  };
+  assert.equal(await ensureSettings(env, { schema_ready: 0 }, refresh), false); assert.equal(refreshes, 0);
+  assert.equal(await ensureSettings(env, { schema_ready: 1 }, refresh), true); assert.equal(refreshes, 1);
+  setting.title = 'User customized title';
+  assert.equal(await ensureSettings(env, { schema_ready: 1 }, refresh), true); assert.equal(refreshes, 1);
+  assert.equal(cache.get('setting:').title, 'User customized title');
+});
+
+test('settings bootstrap waits for KV visibility rather than claiming health after a write', async () => {
+  let visible = false; let refreshes = 0;
+  const env = { kv: { get: async () => visible ? {title: domain} : null } };
+  const refresh = async () => { refreshes++; };
+  assert.equal(await ensureSettings(env, {schema_ready: 1}, refresh), false);
+  assert.equal(refreshes, 1);
+  visible = true;
+  assert.equal(await ensureSettings(env, {schema_ready: 1}, refresh), true);
+  assert.equal(refreshes, 1);
 });
 
 test('public DNS verifier checks split TXT, MX priority, both resolvers and rejects duplicate SPF', async () => {

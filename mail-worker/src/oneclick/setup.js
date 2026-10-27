@@ -1,9 +1,19 @@
+import KvConst from '../const/kv-const.js';
+
 const headers = {
   'Cache-Control': 'no-store',
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 };
+
+export async function ensureSettings(env, meta, refresh) {
+  if (!meta?.schema_ready) return false;
+  if (await env.kv.get(KvConst.SETTING, { type: 'json' })) return true;
+  await refresh({ env, set() {} });
+  // KV can take time to propagate; do not report healthy until the cache is readable.
+  return !!await env.kv.get(KvConst.SETTING, { type: 'json' });
+}
 
 export async function sha256(value) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));

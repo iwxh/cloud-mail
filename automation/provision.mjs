@@ -296,6 +296,8 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   if (!routing?.enabled) await cf.request('POST', `${zonePath}/email/routing/dns`, { name: domain });
   const routingRecords = await cf.get(`${zonePath}/email/routing/dns`);
   await ensureEmailDNS(cf, state.zoneId, domain, routingRecords, 'routing');
+  // The Worker initializes its settings cache during health checks, before accepting inbound mail.
+  const status = await probe(`https://${checked.named.hostname}/_cloudmail/health`, state.deploymentId);
   const catchAll = await cf.get(`${zonePath}/email/routing/rules/catch_all`, true);
   if (catchAll?.enabled && !(catchAll.actions?.length === 1 && catchAll.actions[0].type === 'worker' && catchAll.actions[0].value?.[0] === state.worker)) {
     throw new Error('Catch-all changed ownership during deployment; nothing overwritten.');
@@ -310,7 +312,6 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   const expectedDNS = publicRecords.filter(record => record.name !== `_dmarc.${domain}`);
   expectedDNS.push(normalizeRecord(dmarc[0], domain));
   await verifyDNS(expectedDNS);
-  const status = await probe(`https://${checked.named.hostname}/_cloudmail/health`, state.deploymentId);
   if (!status.activated) {
     await requestActivation(cf, state, ownerEmail);
     log('Activation email accepted by Cloudflare. Check the configured owner mailbox, including spam. Delivery is not yet confirmed.');
