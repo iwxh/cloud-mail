@@ -21,3 +21,7 @@ jobs:
     uses: ./.github/workflows/new-mail-service.yml
     with:
       domain: iwxh.cc
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      MAIL_OWNER_EMAIL: ${{ secrets.MAIL_OWNER_EMAIL }}

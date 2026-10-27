@@ -6,6 +6,13 @@ on:
       domain:
         required: true
         type: string
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      MAIL_OWNER_EMAIL:
+        required: true
   workflow_dispatch:
     inputs:
       domain:

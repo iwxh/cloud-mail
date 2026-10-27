@@ -12,6 +12,8 @@
 首轮验收专用工作流 `first-domain-acceptance.yml` 仅允许同仓库 PR #3、`feat/oneclick-cf-mail` 分支、非草稿状态，以 `iwxh.cc` 为固定目标调用同一部署器。
 它仍受 `mail-provisioning` 的人工审批约束；需单独批准该 PR 的 `refs/pull/3/merge` 部署引用，不能放开所有 PR 或取消审批。
 验收完成后删除此专用工作流，再单独安排正式的一键入口，不会为测试而合并 main。
+复用工作流时，调用方必须逐项传递 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`MAIL_OWNER_EMAIL`，被调用方在 `workflow_call.secrets` 中声明为必填，并在任务上使用 `mail-provisioning` 环境；仅指定环境名称不足以传递密钥。
+不要使用 `secrets: inherit`，避免将无关的仓库密钥一起交给部署流程。密钥值仍只保存在受审批保护的环境中。
 
 ## 首次准备（只需一次）
 
