@@ -79,7 +79,9 @@ class FakeCF {
     }
     if (method === 'POST' && path.endsWith('/d1/database')) {
       const item = { uuid: '11111111-1111-4111-8111-111111111111', name: body.name };
-      this.databases.push(item); this.db = new DatabaseSync(':memory:'); return { result: item };
+      this.databases.push(item); this.db = new DatabaseSync(':memory:');
+      this.db.exec('CREATE TABLE _cf_KV (key TEXT PRIMARY KEY,value BLOB) WITHOUT ROWID');
+      return { result: item };
     }
     if (path.endsWith('/dns_records')) { this.dns.push(structuredClone(body)); return { result: { id: 'dns' } }; }
     if (path.endsWith('/workers/domains')) { this.domains.push(structuredClone(body)); return { result: body }; }
@@ -229,6 +231,44 @@ test('changing source commit or recorded D1 binding is rejected', async () => {
   await assert.rejects(provision(cf.options({ commit: 'f'.repeat(40) })), /original workflow/);
   cf.settings.bindings.find(item => item.name === 'db').id = '22222222-2222-4222-8222-222222222222';
   await assert.rejects(provision(cf.options()), /D1 binding/);
+});
+
+async function stoppedBeforeInitialization() {
+  const cf = new FakeCF();
+  const query = cf.query.bind(cf);
+  cf.query = async (...args) => {
+    if (args[2].startsWith('CREATE TABLE _cloudmail_deployment')) throw new Error('Stopped before application initialization');
+    return query(...args);
+  };
+  await assert.rejects(provision(cf.options()), /Stopped before application initialization/);
+  cf.query = query;
+  return cf;
+}
+
+test('D1 reserved table is retained and empty never-deployed resources can resume corrected source', async () => {
+  const cf = await stoppedBeforeInitialization();
+  assert.equal(cf.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'").get().n, 1);
+  const dbId = cf.state.databaseId; const kvId = cf.state.kvId;
+  await provision(cf.options({ commit: 'f'.repeat(40) }));
+  assert.equal(cf.state.commit, 'f'.repeat(40)); assert.equal(cf.state.initialCommit, commit);
+  assert.equal(cf.state.databaseId, dbId); assert.equal(cf.state.kvId, kvId);
+  assert.equal(cf.databases.length, 1); assert.equal(cf.namespaces.length, 1); assert.equal(cf.deploys, 1);
+  assert.equal(cf.db.prepare("SELECT name FROM sqlite_master WHERE name='_cf_KV'").get().name, '_cf_KV');
+});
+
+test('corrected-source resume never adopts initialized, unknown-table, deployed or domain-bound resources', async () => {
+  const modifications = [
+    cf => cf.db.exec('CREATE TABLE customer_data (id INTEGER)'),
+    cf => cf.db.exec('CREATE TABLE _cf_custom (id INTEGER)'),
+    cf => cf.state.workerDeployed = true,
+    cf => cf.state.sendingRequested = true,
+    cf => cf.domains.push({hostname: `mail.${domain}`,service: names(domain).worker})
+  ];
+  for (const modify of modifications) {
+    const cf = await stoppedBeforeInitialization(); modify(cf);
+    await assert.rejects(provision(cf.options({ commit: 'f'.repeat(40) })), /original workflow/);
+    assert.equal(cf.state.commit, commit); assert.equal(cf.deploys, 0); assert.equal(cf.secrets.length, 0);
+  }
 });
 
 test('completed project is not redeployed or silently unpaused on a repeat run', async () => {

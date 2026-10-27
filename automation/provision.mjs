@@ -11,6 +11,8 @@ export const STATE_KEY = '_cloudmail_provisioner_v1';
 export const APP_VERSION = 1;
 const hex32 = /^[a-f0-9]{32}$/i;
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
+const sourceSHA = /^[a-f0-9]{40}$/;
+const applicationTablesSQL = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '_cf_KV'";
 const hash = value => createHash('sha256').update(value).digest('hex');
 const random = () => randomBytes(32).toString('hex');
 
@@ -34,6 +36,7 @@ export function names(domain) {
 function assertState(state, accountId, zoneId, domain, repository) {
   if (state?.version !== APP_VERSION || state.domain !== domain || state.accountId !== accountId ||
       state.zoneId !== zoneId || state.repository !== repository || !hex32.test(state.kvId) ||
+      !sourceSHA.test(state.commit) || (state.initialCommit !== undefined && !sourceSHA.test(state.initialCommit)) ||
       !/^[a-f0-9]{64}$/.test(state.deploymentId) || state.worker !== names(domain).worker ||
       state.databaseName !== `cm-db-${hash(domain).slice(0, 20)}-${state.deploymentId.slice(0, 8)}` ||
       (state.databaseId && !uuid.test(state.databaseId)) || (state.sendingId && !hex32.test(state.sendingId))) {
@@ -161,7 +164,8 @@ export function workerConfig(state, workerDir) {
 
 export async function initialize(cf, state, schema, ownerEmail, forward) {
   const query = (sql, params) => cf.query(state.accountId, state.databaseId, sql, params);
-  const tables = (await query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"))[0].results;
+  // D1 creates _cf_KV in every new database; it is storage metadata, not application data.
+  const tables = (await query(applicationTablesSQL))[0].results;
   const metaExists = tables.some(item => item.name === '_cloudmail_deployment');
   if (!metaExists && tables.length) throw new Error('Database is not empty and has no deployment ownership marker.');
   if (!metaExists) {
@@ -215,20 +219,23 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   workerDir, schema, deployWorker, probe = probeWebsite, verifyDNS = verifyPublicDNS, log = console.log }) {
   domain = domainName(domain);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail || '')) throw new Error('Set MAIL_OWNER_EMAIL in GitHub Secrets.');
-  if (!/^[a-f0-9]{40}$/.test(commit || '') || !/^[\w.-]+\/[\w.-]+$/.test(repository || '')) throw new Error('A fixed source commit and repository are required.');
+  if (!sourceSHA.test(commit || '') || !/^[\w.-]+\/[\w.-]+$/.test(repository || '')) throw new Error('A fixed source commit and repository are required.');
   const checked = await inspect(cf, { accountId, domain, repository, ownerEmail });
   let state = checked.state;
   log(`Preflight passed for ${domain}. ${apply ? 'Creating/resuming only this project.' : 'Read-only plan; no changes made.'}`);
   if (!apply) return { domain, hostname: checked.named.hostname, mode: 'plan', existing: !!state };
   const account = `/accounts/${accountId}`;
   const zonePath = `/zones/${checked.zone.id}`;
-  if (state && state.commit !== commit) throw new Error('Resume using the original workflow run/commit. This command never upgrades existing projects.');
+  const changedSource = state && state.commit !== commit;
+  const rejectSource = () => { throw new Error('Resume using the original workflow run/commit. Only verified empty resources that were never deployed can accept a corrected source commit.'); };
+  if (changedSource && (state.configured || state.workerDeployed || state.sendingRequested || state.sendingId ||
+      checked.settings || checked.bound.length || checked.senders.length)) rejectSource();
   const save = () => cf.putValue(accountId, state.kvId, STATE_KEY, state);
   if (!state) {
     const created = (await cf.request('POST', `${account}/storage/kv/namespaces`, { title: checked.named.kv })).result;
     if (!hex32.test(created?.id)) throw new Error('Invalid KV creation response.');
     const deploymentId = random();
-    state = { version: APP_VERSION, repository, commit, accountId, zoneId: checked.zone.id, domain,
+    state = { version: APP_VERSION, repository, commit, initialCommit: commit, accountId, zoneId: checked.zone.id, domain,
       worker: checked.named.worker, kvId: created.id, deploymentId, forward,
       databaseName: `cm-db-${hash(domain).slice(0, 20)}-${deploymentId.slice(0, 8)}` };
     await save();
@@ -236,6 +243,14 @@ export async function provision({ cf, accountId, domain, repository, commit, own
   const databases = await cf.list(`${account}/d1/database`);
   let database = databases.find(item => item.name === state.databaseName);
   if (state.databaseId && database?.uuid !== state.databaseId) throw new Error('Recorded database disappeared or changed; no replacement created.');
+  if (changedSource) {
+    if (!state.databaseId || !database) rejectSource();
+    const tables = (await cf.query(accountId, state.databaseId, applicationTablesSQL))[0].results;
+    if (tables.length) rejectSource();
+    state.initialCommit ||= state.commit;
+    log(`Resuming verified empty, never-deployed resources from ${state.commit} with corrected source ${commit}. Initial source retained in the ownership record.`);
+    state.commit = commit;
+  }
   if (!database) database = (await cf.request('POST', `${account}/d1/database`, { name: state.databaseName })).result;
   if (!uuid.test(database?.uuid)) throw new Error('Invalid D1 creation response.');
   state.databaseId = database.uuid;
