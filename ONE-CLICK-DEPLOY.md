@@ -5,16 +5,31 @@
 ## 当前状态
 
 这是独立部署器，不替换现有的 `npm run deploy`，不会自动更新旧项目。
-启用前必须通过离线测试、GitHub 的 Worker 打包检查，并用一个**没有旧邮箱业务的新域名**完成首轮真实验收。
-代码分支为 `feat/oneclick-cf-mail`。合并到默认分支前，新工作流可能不会出现在 Actions 的手动运行列表中。
-不要为显示按钮而直接合并：当前仓库的 main 仍被部分现有服务自动跟随，必须先安排隔离或暂停相关自动构建。
+代码已通过 27 项离线测试、GitHub Worker 打包检查及 `iwxh.cc` 的真实收发验收。
+正式入口使用默认分支 `main`：打开 [New Cloud Mail service](https://github.com/iwxh/cloud-mail/actions/workflows/new-mail-service.yml)，点击 **Run workflow**，分支选择 `main`，只填写新域名。
+运行前需要完成下文的一次性正式授权；测试期仅限 `iwxh.cc` 的 7 天 Token 不能直接部署其他区域。
+
+### 现有邮箱隔离状态（2026-10-26）
+
+| 现有项目 | 生产分支 | 自动生产构建 | 预览分支构建 |
+| --- | --- | --- | --- |
+| mail-mailcube | main | 已暂停 | 关闭 |
+| aishuijiao-mail | main | 已暂停 | 关闭 |
+| szjcl-mail | main | 已暂停 | 关闭 |
+| cloud-mail2（zmail.edu.kg） | main | 保持暂停 | 关闭 |
+| cloud-mail3（kmail.edu.kg） | fix/qq-sender-kmail-20261020 | 保持开启，仅专用分支 | 关闭 |
+| cloud-mail4（kmail.edu.pl） | fix/qq-sender-kmail-pl-20261020 | 保持开启，仅专用分支 | 关闭 |
+
+暂停构建只停止代码提交触发的更新，当前网站、收发信、账号及独立数据库继续使用原线上版本。
+需要更新暂停项目时，先为该项目准备独立发布分支并核对构建变量，再恢复构建；不要直接打开跟随 `main` 的构建开关。
+`iwxh.cc` 的一键项目没有 CF Git 构建连接，不会随仓库提交自动更新。
 
 首轮 `iwxh.cc` 的部署运行 [40443582270](https://github.com/iwxh/cloud-mail/actions/runs/40443582270) 已通过，公网 DNS 校验通过。管理员已自行激活并登录，外部 Gmail 测试邮件已进入网页收件箱，从正式网站发往 QQ 的测试邮件也由用户确认收到。
 本次首轮暴露的根域 Email Routing 请求参数问题已修正，并增加回归测试；测试域名通过后台启用根域收信后，使用同一固定版本重试完成部署。
 激活页曾因 `Referrer-Policy: no-referrer` 使浏览器表单的 `Origin` 变成 `null`，已改为 `same-origin`；仍拒绝跨站、空值和缺失来源。线上测试项目仅修正这一项响应头，未重跑初始化。新部署代码已包含修正。
 首轮测试的 CF 原生发信在 QQ 上仍显示“代发”，不把消除该提示作为此通道的验收承诺。
-临时的 `first-domain-acceptance.yml` 已移除，后续代码修改不会再次对固定测试域名发起部署。此前只允许同仓库 PR #3 的精确部署引用，并保留人工审批；没有开放其他 PR 或合并 main。
-正式的一键入口仍需在现有服务完成构建隔离后单独发布，不会为显示按钮而影响旧项目。
+临时的 `first-domain-acceptance.yml` 已移除，后续代码修改不会再次对固定测试域名发起部署。此前只允许同仓库 PR #3 的精确部署引用，并保留人工审批。
+正式入口仅由用户手动触发；普通代码提交不会自动新建邮箱。
 复用工作流时，调用方必须逐项传递 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`MAIL_OWNER_EMAIL`，被调用方在 `workflow_call.secrets` 中声明为必填，并在任务上使用 `mail-provisioning` 环境；仅指定环境名称不足以传递密钥。
 不要使用 `secrets: inherit`，避免将无关的仓库密钥一起交给部署流程。密钥值仍只保存在受审批保护的环境中。
 
@@ -32,7 +47,7 @@
 | `CLOUDFLARE_API_TOKEN` | 仅授予部署所需权限的 CF API Token，不使用 Global API Key |
 | `MAIL_OWNER_EMAIL` | 第 3 步已验证的邮箱，用于接收激活码 |
 
-建议为 Environment 启用 Required reviewers，并限制可使用它的部署分支。
+为 Environment 保留 Required reviewers，并将可使用它的部署分支限制为 `main`；正式发布后移除测试分支和 `refs/pull/3/merge` 的环境授权。
 不要把部署 Token 放到邮箱 Worker 中；它只在部署工作流的预检和执行步骤中使用。
 
 ### Token 权限
@@ -48,6 +63,8 @@
 
 “Edit Cloudflare Workers”预设不一定包含 D1 和邮件服务权限。遇到 403 时补齐对应权限，不要直接换用全局密钥。
 如果 Token 只授权了特定区域，后续新域名也必须位于授权范围内。
+如果希望以后每次只输入域名，应在本人确认后将区域权限设为指定账号下所有区域（含后续新增区域）。这份授权实际具备这些区域的 DNS 编辑能力，并不只限于邮件记录；部署器的预检负责保护已有网站和邮箱，Token 始终只存放在受人工审批保护的 GitHub 环境中。
+正式 Token 可设置 90 天有效期，到期后由本人在同一 Secret 中替换；不要把 Token 值提交到仓库。
 
 ### 可选默认转发
 
