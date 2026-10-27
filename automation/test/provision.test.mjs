@@ -436,6 +436,13 @@ test('activation requires same origin, valid code and password; replay cannot re
     body: new URLSearchParams({ code, password: 'A strong password 123!', confirm: 'A strong password 123!', ...values })
   });
   const hasher = password => cryptoUtils.hashPassword(password);
+  const page = await setupRequest(new Request('https://mail.example.com/setup'), env, meta, hasher);
+  assert.equal(page.headers.get('Referrer-Policy'), 'same-origin');
+  assert.match(await page.text(), /<form method="post" action="\/setup"/);
+  assert.equal((await setupRequest(send({}, 'null'), env, meta, hasher)).status, 403);
+  const missingOrigin = send();
+  missingOrigin.headers.delete('Origin');
+  assert.equal((await setupRequest(missingOrigin, env, meta, hasher)).status, 403);
   assert.equal((await setupRequest(send({}, 'https://evil.example'), env, meta, hasher)).status, 403);
   assert.equal((await setupRequest(send({ code: 'f'.repeat(64) }), env, meta, hasher)).status, 400);
   assert.equal((await setupRequest(send({ confirm: 'mismatch' }), env, meta, hasher)).status, 400);

@@ -2,7 +2,9 @@ import KvConst from '../const/kv-const.js';
 
 const headers = {
   'Cache-Control': 'no-store',
-  'Referrer-Policy': 'no-referrer',
+  // no-referrer makes native form POSTs carry Origin: null, failing our same-origin check.
+  // Keep the origin for our own form while omitting referrers to other sites.
+  'Referrer-Policy': 'same-origin',
   'X-Content-Type-Options': 'nosniff',
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 };
