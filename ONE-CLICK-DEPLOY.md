@@ -77,12 +77,13 @@ CF 正式部署令牌已覆盖当前账号下所有区域，并设置 90 天有�
 
 1. 将新域名接入 CF，等待 Active。
 2. GitHub → Actions → **New Cloud Mail service** → Run workflow。
-3. 输入小写域名，例如 `example.com`，不含 `https://`、路径、空格或通配符。国际化域名使用 punycode。
-4. 确认运行。它会先只读检查冲突，再创建该域名的独立资源。
-5. 查看运行摘要，等待网站 DNS 和证书生效。
-6. 到 `MAIL_OWNER_EMAIL` 查收激活邮件（也检查垃圾邮件）。
-7. 打开 `https://mail.example.com/setup`，输入邮件中的激活码，自行设置 12–30 字符密码。
-8. 登录 `https://mail.example.com/login`，管理员是 `admin@example.com`。
+3. 分支选择 `main`，输入小写域名，例如 `example.com`，不含 `https://`、路径、空格或通配符。国际化域名使用 punycode。
+4. 点击绿色 **Run workflow**，打开本次运行。如果显示 **Waiting for review**，点击 **Review deployments**，勾选 `mail-provisioning`，再点击 **Approve and deploy 1**。每次新建或重试均保留本人审批。
+5. 审批后，流程先只读检查冲突，再创建该域名的独立资源。
+6. 查看运行摘要，等待网站 DNS 和证书生效。
+7. 到 `MAIL_OWNER_EMAIL` 查收激活邮件（也检查垃圾邮件）。
+8. 打开 `https://mail.example.com/setup`，输入邮件中的激活码，自行设置 12–30 字符密码。
+9. 登录 `https://mail.example.com/login`，管理员是 `admin@example.com`。
 
 激活码不放在 URL、构建摘要或仓库中。数据库只保存其摘要，有效期 24 小时，使用后失效。
 未完成激活时，普通 API、公开注册和登录均不开放；管理员邮箱已预留，可以保存外部来信。
