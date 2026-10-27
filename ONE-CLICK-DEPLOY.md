@@ -7,7 +7,8 @@
 这是独立部署器，不替换现有的 `npm run deploy`，不会自动更新旧项目。
 代码已通过 27 项离线测试、GitHub Worker 打包检查及 `iwxh.cc` 的真实收发验收。
 正式入口使用默认分支 `main`：打开 [New Cloud Mail service](https://github.com/iwxh/cloud-mail/actions/workflows/new-mail-service.yml)，点击 **Run workflow**，分支选择 `main`，只填写新域名。
-运行前需要完成下文的一次性正式授权；测试期仅限 `iwxh.cc` 的 7 天 Token 不能直接部署其他区域。
+本仓库的正式授权已配置完成：`mail-provisioning` 仅允许 `main` 使用，保留本人审批和禁止管理员绕过；三个部署 Secret 均已保存。
+CF 正式部署令牌已覆盖当前账号下所有区域，并设置 90 天有效期。它沿用原测试令牌的值，仅更新名称、权限范围和期限，无需重新复制到 GitHub。请在 CF 的 API 令牌页查看到期日，到期前自行续期或替换同名 Secret。
 
 ### 现有邮箱隔离状态（2026-10-26）
 
